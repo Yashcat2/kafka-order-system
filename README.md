@@ -75,3 +75,29 @@ reset (I am, so it's not critical, but habit).
 | `SIMULATED_FAILURE_RATE` | `0.3` | chance a single attempt "fails" — set higher (I used `1.0`) to force a DLQ hit while testing |
 
 ## Project structure
+kafka-order-system/
+├── requirements.txt
+├── schemas/
+│ ├── order.avsc
+│ └── order_dlq.avsc
+├── producer/
+│ └── producer.py
+└── consumer/
+├── consumer.py # retry + DLQ + aggregation
+└── dlq_monitor.py # tails the DLQ topic, for the demo
+
+
+## Known issues / what I'd improve with more time
+
+- `process_order()` just rolls a random number to decide whether to fail —
+  fine for demonstrating the retry/DLQ mechanism, but a real system would
+  have actual failure conditions (downstream service timeout, etc.)
+- No persistence for the aggregation — it resets if the consumer restarts,
+  since it's all in-memory. Would need to checkpoint it somewhere for a
+  real deployment.
+- `kafka-python`'s serializer/deserializer args throw deprecation warnings
+  because they expect a class-based interface rather than a plain
+  function — cosmetic, didn't fix it since it doesn't affect behavior.
+- Aiven's free tier auto-pauses after ~24h idle, so if you're grading this
+  from the repo later rather than the live demo, the service may need to
+  be manually restarted from the console first.
