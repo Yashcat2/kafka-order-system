@@ -1,143 +1,77 @@
 # Kafka Order Processing System
 
-Produces and consumes Avro-serialized order messages, with real-time price
-aggregation, retry logic for transient failures, and a Dead Letter Queue
-(DLQ) for permanently-failed messages.
+Assignment 1 submission — a Kafka producer/consumer pair that streams order
+messages with Avro serialization, does real-time price aggregation, retries
+on failure, and sends permanently-failed messages to a dead letter queue.
 
-## Architecture
+Gunawardhana I.K.Y.K (EG/2021/4535)
 
-```
-producer.py --> [orders topic] --> consumer.py --> [orders-dlq topic] --> dlq_monitor.py
-                (Avro, order.avsc)      |
-                                        v
-                          running avg (overall + per product)
-```
+## What it does
 
-- **Serialization**: Avro, via Confluent Schema Registry (`order.avsc` for
-  live orders, `order_dlq.avsc` for DLQ records — it carries the original
-  fields plus `errorReason`, `retryCount`, `failedAt`).
-- **Retry logic**: on a simulated transient failure, the consumer retries
-  up to `MAX_RETRIES` times with exponential backoff before giving up.
-- **DLQ**: once retries are exhausted, the order is republished to
-  `orders-dlq` with failure metadata, and the original offset is still
-  committed (so the consumer doesn't get stuck reprocessing it forever).
-- **Aggregation**: the consumer keeps a running (incremental) average price
-  overall and per product — no need to store the full history in memory.
+- Producer sends randomly generated orders (`orderId`, `product`, `price`)
+  to a Kafka topic, Avro-encoded.
+- Consumer reads them, simulates a transient failure some % of the time,
+  retries with exponential backoff (3 attempts), and if it still fails
+  sends the order to a DLQ topic with the error reason and retry count
+  attached.
+- Consumer also keeps a running average price — overall and per product —
+  and prints it as each message comes in.
+- `dlq_monitor.py` just tails the DLQ topic so you can see failed messages
+  live, separately from the consumer's own logs.
 
-## 1. Get a Kafka broker — two options
+## Setup
 
-**Option A — no Docker needed (recommended if Docker/your machine is a problem):**
-use [Aiven's free Kafka tier](https://console.aiven.io) — no credit card required,
-runs in their cloud, and includes the Karapace schema registry out of the box.
+Using Aiven's free Kafka tier (no Docker — I had Docker issues on my
+machine and didn't want to fight it during the assignment).
 
-1. Sign up at console.aiven.io, create a project.
-2. Create service -> **Apache Kafka** -> Service tier: **Free**. Give it a name,
-   click Create. It takes a minute or two to go "Running".
-3. Open the service -> **Quick connect** -> pick **Python**. This gives you the
-   exact bootstrap server, ports, and a link to download the SSL cert bundle
-   (`ca.pem`, `service.cert`, `service.key`).
-4. Put those three files in a `certs/` folder here, copy `.env.example` to
-   `.env` and fill in the values from Quick connect (bootstrap server, schema
-   registry URL, and the Karapace username/password shown on the service's
-   **Overview** page under "Schema Registry").
-5. Create the two topics (`orders`, `orders-dlq`) from the Aiven Console's
-   **Topics** tab — free tier caps you at 5 topics, 2 partitions each, which
-   is plenty here.
-6. Before running anything: `export $(grep -v '^#' .env | xargs)`
+1. Create a Kafka service on [Aiven](https://console.aiven.io) (free tier).
+2. Once it's running, go to **Quick connect** → Python, copy the bootstrap
+   server address, and download the CA cert (`ca.pem`).
+3. Create two topics manually from the Aiven console's **Topics** tab:
+   `orders` and `orders-dlq`. (Aiven doesn't auto-create topics — my
+   consumer hung for a full 60s timeout the first time I forgot this.)
+4. Put `ca.pem` in a `certs/` folder, copy `.env.example` to `.env`, fill
+   in the values (see table below).
+5. `python -m venv .venv` then activate it, then `pip install -r requirements.txt`
 
-Note: a free-tier service auto-powers-off after ~24h idle (or within a few
-hours if never used) — just hit "Power on" in the console before your demo.
+### A note on `confluent-kafka`
 
-**Option B — local Docker** (if/when Docker is working again):
+I originally had `confluent-kafka[avro]` in requirements.txt, following
+most Kafka+Python tutorials. It doesn't ship prebuilt wheels for Python
+3.13 on Windows, and building it from source needs `librdkafka` + MSVC
+build tools, which I didn't have set up. Rather than fight the C build
+chain, I switched everything to `kafka-python` + `fastavro`, which are
+pure Python and install cleanly. Schema validation happens against the
+local `.avsc` files in `schemas/`, no Schema Registry involved — simpler
+for what this assignment needs.
 
-```bash
-docker-compose up -d
-```
+## Running it
 
-This brings up Zookeeper, Kafka (`localhost:9092`), and Schema Registry
-(`localhost:8081`) — and none of the `.env` / SSL variables above are needed.
-
-## 2. Install dependencies
+Three terminals, venv activated in each:
 
 ```bash
-python -m venv venv
-source venv/bin/activate      # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-## 3. Run the demo
-
-In three separate terminals (with the venv activated):
-
-```bash
-# Terminal 1 — consumer (processes orders, retries, aggregates, DLQs failures)
 python consumer/consumer.py
-
-# Terminal 2 — producer (streams random orders, ~1/sec)
 python producer/producer.py
-
-# Terminal 3 — DLQ monitor (optional, for showing the grader failed messages live)
 python consumer/dlq_monitor.py
 ```
 
-You should see:
-- the producer logging each delivered order,
-- the consumer logging processing attempts, retries, running averages,
-  and any messages it routes to the DLQ,
-- the DLQ monitor printing the same failed messages with their error
-  reason and retry count.
+Order doesn't strictly matter but starting the consumer first means you
+don't miss the earliest messages if you're not using `earliest` offset
+reset (I am, so it's not critical, but habit).
 
-## Tuning knobs (env vars)
+## Env vars
 
-| Variable                  | Default          | Purpose                                    |
-|----------------------------|------------------|---------------------------------------------|
-| `KAFKA_BOOTSTRAP_SERVERS`  | `localhost:9092` | Kafka broker address                        |
-| `SCHEMA_REGISTRY_URL`      | `http://localhost:8081` | Schema Registry address              |
-| `ORDERS_TOPIC`             | `orders`         | Topic for live order messages               |
-| `ORDERS_DLQ_TOPIC`         | `orders-dlq`     | Topic for permanently-failed messages       |
-| `MAX_RETRIES`              | `3`              | Retry attempts before sending to DLQ        |
-| `BASE_BACKOFF_SECONDS`     | `1.0`            | Base for exponential backoff                |
-| `SIMULATED_FAILURE_RATE`   | `0.3`            | Chance a given order "fails" (demo purposes)|
-| `KAFKA_SECURITY_PROTOCOL`  | *(unset)*        | Set to `SSL` for Aiven; unset for local Docker |
-| `KAFKA_SSL_CA_LOCATION`    | *(unset)*        | Path to `ca.pem` (Aiven only)                |
-| `KAFKA_SSL_CERTFILE`       | *(unset)*        | Path to `service.cert` (Aiven only)          |
-| `KAFKA_SSL_KEYFILE`        | *(unset)*        | Path to `service.key` (Aiven only)           |
-| `SCHEMA_REGISTRY_USER`     | *(unset)*        | Karapace username, e.g. `avnadmin` (Aiven only) |
-| `SCHEMA_REGISTRY_PASSWORD` | *(unset)*        | Karapace password (Aiven only)               |
-
-To demonstrate the DLQ live, either leave `SIMULATED_FAILURE_RATE` as-is
-(some orders will always be routed to the DLQ eventually) or temporarily
-set it to `1.0` to force every order through retries into the DLQ.
+| Variable | Default | Notes |
+|---|---|---|
+| `KAFKA_BOOTSTRAP_SERVERS` | — | required, no default — Aiven broker:port |
+| `KAFKA_SECURITY_PROTOCOL` | `PLAINTEXT` | `SASL_SSL` for Aiven |
+| `KAFKA_SASL_MECHANISM` | — | `SCRAM-SHA-256` for Aiven |
+| `KAFKA_SASL_USERNAME` / `KAFKA_SASL_PASSWORD` | — | Aiven service user (`avnadmin` by default) |
+| `KAFKA_SSL_CA_LOCATION` | — | path to `ca.pem` |
+| `ORDERS_TOPIC` | `orders` | |
+| `ORDERS_DLQ_TOPIC` | `orders-dlq` | |
+| `MAX_RETRIES` | `3` | |
+| `BASE_BACKOFF_SECONDS` | `1.0` | doubles each retry |
+| `SIMULATED_FAILURE_RATE` | `0.3` | chance a single attempt "fails" — set higher (I used `1.0`) to force a DLQ hit while testing |
 
 ## Project structure
-
-```
-kafka-order-system/
-├── docker-compose.yml       # Kafka + Zookeeper + Schema Registry
-├── requirements.txt
-├── schemas/
-│   ├── order.avsc           # live order schema
-│   └── order_dlq.avsc       # DLQ record schema
-├── producer/
-│   └── producer.py
-└── consumer/
-    ├── consumer.py          # retry + DLQ + aggregation
-    └── dlq_monitor.py       # optional live-demo helper
-```
-
-## Git repository
-
-```bash
-git init
-git add .
-git commit -m "Kafka order pipeline: Avro, retry, DLQ, real-time aggregation"
-git remote add origin <your-repo-url>
-git push -u origin main
-```
-
-## Notes on `process_order()`
-
-`process_order()` in `consumer.py` is currently a stand-in that randomly
-raises `TransientError` to simulate a flaky downstream dependency (a DB
-write, an external pricing API, etc.). Swap in real logic there — the
-retry/backoff/DLQ scaffolding around it doesn't need to change.
